@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>NWS 7-Day Forecast Map</title>
+  <title>NWS 5-Day Forecast Map</title>
 
   <!-- Leaflet -->
   <link
@@ -42,12 +42,13 @@
 
 <body>
   <div id="map"></div>
-  <div class="hint">Click anywhere to load the NWS 7-day forecast + active alerts for that point.</div>
+  <div class="hint">Click anywhere to load the NWS 5-day forecast + active alerts for that point.</div>
 
   <script>
     // --- Config ---
     const INITIAL_CENTER = [40.1, -74.5]; // NJ-ish
     const INITIAL_ZOOM = 7;
+    const DAYS_TO_SHOW = 5; // ✅ change this number for 3/5/7-day views
 
     // --- Map setup ---
     const map = L.map("map").setView(INITIAL_CENTER, INITIAL_ZOOM);
@@ -79,7 +80,7 @@
       return res.json();
     }
 
-    // --- 7-day daily-row grouping helpers ---
+    // --- 5-day daily-row grouping helpers ---
     function dateKey(iso) {
       const d = new Date(iso);
       // Local date key for grouping
@@ -107,7 +108,7 @@
         else row.night = p;
       }
 
-      return Array.from(byDay.values()).slice(0, 7);
+      return Array.from(byDay.values()).slice(0, DAYS_TO_SHOW); // ✅ now 5 days
     }
 
     function tempStr(p) {
@@ -191,7 +192,7 @@
         if (requestId !== inFlight) return;
 
         const props = pointData?.properties || {};
-        const forecastUrl = props.forecast; // ✅ 7-day style (day/night periods), NOT hourly
+        const forecastUrl = props.forecast; // ✅ 7-day style periods (we render 5 days from it)
         const rel = props?.relativeLocation?.properties || null;
         const locationLabel = rel ? `${rel.city}, ${rel.state}` : (props.radarStation || "NWS Point");
 
