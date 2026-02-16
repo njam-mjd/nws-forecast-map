@@ -1,1 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>NWS Hourly Forecast Map</title>
+
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+
+  <style>
+    html, body { height: 100%; margin: 0; }
+    #map { height: 100%; }
+    .hint {
+      position: absolute; top: 10px; left: 10px; z-index: 999;
+      background: rgba(255,255,255,0.92); padding: 8px 10px; border-radius: 8px;
+      box-shadow: 0 1px 6px rgba(0,0,0,0.15);
+      font: 13px/1.3 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+    .popup h3 { margin: 0 0 6px 0; font-size: 16px; }
+    .meta { color: #555; font-size: 12px; margin-bottom: 8px; }
+    .row { display: flex; gap: 8px; align-items: baseline; margin: 4px 0; }
+    .t { min-width: 86px; font-variant-numeric: tabular-nums; }
+    .temp { min-width: 64px; font-weight: 600; }
+    .wx { flex: 1; }
+    .small { color:#666; font-size:12px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="hint">Click anywhere to load the NWS hourly forecast for that point.</div>
+
+  <script>
+    const INITIAL_CENTER = [40.1, -74.5]; // NJ-ish
+    const INITIAL_ZOOM = 7;
+    const HOURS_TO_SHOW = 12;
+
+    const map = L.map("map").setView(INITIAL_CENTER, INITIAL_ZOOM);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 18,
+      attribution: "&copy; OpenStreetMap contributors"
+    }).addTo(map);
+
+    let clickMarker = null;
+    let inFlight = 0;
+
+    function esc(s) {
+      return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    async function fetchJson(url) {
+      // Note: Do NOT try to set a custom User-Agent header in browser fetch.
+      // NWS documents a UA requirement, but browsers restrict setting it directly. See NWS docs.
+      const res = await fetch(url, { method: "GET" });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(`HTTP ${res.status} for ${url}${txt ? " — " + txt.slice(0, 120) : ""}`);
+      }
+      return res.json();
+    }
+
+    function fmtLatLon(lat, lon) {
+      return `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+    }
+
+    function fmtHour(iso) {
+      // Keeps it simple and localizes to viewer’s locale.
+      const d = new Date(iso);
+      return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    }
+
+    function buildHourlyHtml(label, lat, lon, periods) {
+      const rows = periods.slice(0, HOURS_TO_SHOW).map(p => {
+        const time = p.startTime ? fmtHour(p.startTime) : "";
+        const temp = (p.temperature != null && p.temperatureUnit) ? `${p.temperature}°${p.temperatureUnit}` : "—";
+        const wind = [p.windSpeed, p.windDirection].filter(Boolean).join(" ");
+        const wx = p.shortForecast || "";
+        return `
+          <div class="row">
+            <div class="t">${esc(time)}</div>
+            <div class="temp">${esc(temp)}</div>
+            <div class="wx">${esc(wx)}</div>
+          </div>
+          ${wind ? `<div class="small">Wind: ${esc(wind)}</div>` : ``}
+        `;
+      }).join("");
+
+      return `
+        <div class="popup">
+          <h3>${esc(label)}</h3>
+          <div class="meta">Point: ${esc(fmtLatLon(lat, lon))}</div>
+          ${rows || "<em>No hourly periods returned.</em>"}
+        </div>
+      `;
+    }
+
+    map.on("click", async (e) => {
+      const requestId = ++inFlight; // latest click wins
+      const { lat, lng } = e.latlng;
+
+      if (clickMarker) map.removeLayer(clickMarker);
+      clickMarker = L.marker([lat, lng]).addTo(map);
+
+      const popup = L.popup({ maxWidth: 380 })
+        .setLatLng([lat, lng])
+        .setContent(`<div class="popup"><h3>Loading…</h3><div class="meta">${esc(fmtLatLon(lat,lng))}</div></div>`)
+        .openOn(map);
+
+      try {
+        // 1) Points metadata: discover forecastHourly URL
+        const pointsUrl = `https://api.weather.gov/points/${lat.toFixed(4)},${lng.toFixed(4)}`;
+        const pointData = await fetchJson(pointsUrl);
+        if (requestId !== inFlight) return;
+
+        const props = pointData?.properties || {};
+        const hourlyUrl = props.forecastHourly;
+        const rel = props.relativeLocation?.properties || null;
+        const label = rel ? `${rel.city}, ${rel.state}` : (props.radarStation || "NWS Point");
+
+        if (!hourlyUrl) throw new Error("No forecastHourly URL returned from /points");
+
+        // 2) Hourly forecast
+        const hourlyData = await fetchJson(hourlyUrl);
+        if (requestId !== inFlight) return;
+
+        const periods = hourlyData?.properties?.periods;
+        if (!Array.isArray(periods)) throw new Error("Hourly forecast did not include properties.periods[]");
+
+        popup.setContent(buildHourlyHtml(label, lat, lng, periods));
+      } catch (err) {
+        popup.setContent(`
+          <div class="popup">
+            <h3>Error</h3>
+            <div class="meta">${esc(fmtLatLon(lat,lng))}</div>
+            <div>${esc(err.message || String(err))}</div>
+            <div class="meta">If this is intermittent, retry — NWS is cache-based and occasionally rate-limits.</div>
+          </div>
+        `);
+      }
+    });
+  </script>
+</body>
+</html>
 
